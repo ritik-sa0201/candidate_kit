@@ -2,7 +2,6 @@ import os
 
 import pytest
 
-# Never run tests against the dev database.
 os.environ["MONGO_DB"] = os.getenv("TEST_MONGO_DB", "attendance_test")
 
 if os.getenv("USE_MONGOMOCK") == "1":
@@ -10,20 +9,14 @@ if os.getenv("USE_MONGOMOCK") == "1":
     import pymongo
 
     pymongo.MongoClient = mongomock.MongoClient
-
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import main  # noqa: E402
-
-
+from fastapi.testclient import TestClient 
+from app import main
 @pytest.fixture
 def api():
     main.employees.delete_many({})
     main.logs.delete_many({})
-    with TestClient(main.app) as c:  # runs the lifespan, so indexes get created
+    with TestClient(main.app) as c:
         yield c
-
-
 @pytest.fixture
 def db():
     return main.db

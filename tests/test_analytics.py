@@ -12,7 +12,7 @@ pytestmark = pytest.mark.skipif(os.getenv("USE_MONGOMOCK") == "1", reason="needs
 
 EMPLOYEES = [
     ("EMP0001", "Engineering", "2026-01-05", "09:30", "18:30"),
-    ("EMP0002", "Engineering", "2026-07-13", "09:30", "18:30"),  # joins mid-month (Mon)
+    ("EMP0002", "Engineering", "2026-07-13", "09:30", "18:30"),  
     ("EMP0003", "Sales", "2026-02-01", "09:30", "18:30"),
     ("EMP0004", "Sales", "2026-02-01", "09:30", "18:30"),
     ("EMP0005", "Support", "2026-03-10", "22:00", "06:00"),       # night shift

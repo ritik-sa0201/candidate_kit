@@ -1,12 +1,3 @@
-"""
-Employee Attendance & Analytics API
-
-Run:  uvicorn app.main:app --port 8000
-Env:  MONGO_URI, MONGO_DB (a local .env is loaded; real environment variables win)
-
-Instants are stored as BSON dates (UTC) and exposed as epoch milliseconds.
-Calendar dates and shift times are plain strings, interpreted in IST.
-"""
 import calendar
 import json
 import os
@@ -188,8 +179,6 @@ class PunchOutIn(BaseModel):
 
 
 class RegularizeIn(BaseModel):
-    # defaults are None but an explicit null is still rejected (the types are not Optional).
-    # Unknown fields such as late_minutes are ignored, as the contract asks.
     status: Status = None
     punch_in: EpochMs = None
     punch_out: EpochMs = None
@@ -258,13 +247,13 @@ def ensure_indexes():
     global indexes_ready
     employees.create_index("emp_code", unique=True)
     employees.create_index([("department", 1), ("joined_on", 1)])
-    # one record per employee per day; also the race guard for punch-in
+
     logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
-    # GET /attendance sort, and date-range scans for the analytics
+
     logs.create_index([("date", -1), ("emp_code", 1)])
-    # punch-out: latest punch_in at or before a given instant
+
     logs.create_index([("emp_code", 1), ("punch_in", -1)])
-    # department summary without a department filter starts from joined_on
+
     employees.create_index("joined_on")
     indexes_ready = True
 
@@ -381,7 +370,6 @@ def punch_out(body: PunchOutIn):
 
     rec = logs.find_one({"emp_code": emp["emp_code"], "punch_in": {"$lte": ts}}, sort=[("punch_in", -1)])
     if rec is None:
-        # an open record that starts after ts means the punch-out is before the punch-in
         if logs.find_one({"emp_code": emp["emp_code"], "punch_in": {"$gt": ts}, "punch_out": None}):
             raise validation_error(("body", "punched_at"), "punch-out is before punch-in")
         raise HTTPException(404, "no punch-in found")
@@ -394,8 +382,6 @@ def punch_out(body: PunchOutIn):
 
     day = date.fromisoformat(rec["date"])
     update = {"punch_out": ts, **derived_fields(rec["status"], rec["punch_in"], ts, day, emp)}
-    # the filter only matches while the record is still open, so of two
-    # simultaneous punch-outs exactly one matches
     result = logs.update_one({"_id": rec["_id"], "punch_out": None, "punch_in": rec["punch_in"]}, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(409, "already punched out")
@@ -453,10 +439,6 @@ def regularize(emp_code: str, date_: Annotated[DateStr, Path(alias="date")], bod
         raise validation_error(("body",), "request changes nothing")
 
     entry = {"at": now_utc(), "by": body.regularized_by, "reason": body.reason, "changes": changes}
-
-    # optimistic lock: only write if nobody changed the record since we read it.
-    # history length is part of the check, so two corrections can't both append
-    # on top of the same version and one of them lose its context.
     n = len(rec.get("history") or [])
     guard = {"_id": rec["_id"], "status": old["status"], "punch_in": old["punch_in"],
              "punch_out": old["punch_out"], f"history.{n}": {"$exists": False}}
@@ -524,7 +506,6 @@ def department_summary_pipeline(first: str, last: str, department: Optional[str]
         match["department"] = department
     return [
         {"$match": match},
-        # per-employee totals for the month; the join uses the (emp_code, date) index
         {"$lookup": {
             "from": "attendance_logs",
             "localField": "emp_code",
@@ -546,7 +527,6 @@ def department_summary_pipeline(first: str, last: str, department: Optional[str]
             "as": "month",
         }},
         {"$unwind": {"path": "$month", "preserveNullAndEmptyArrays": True}},
-        # $sum skips missing values, so employees without logs add 0
         {"$group": {
             "_id": "$department",
             "headcount": {"$sum": 1},
@@ -572,9 +552,8 @@ def late_leaderboard_pipeline(first: str, last: str, limit: int, department: Opt
     if department is not None:
         pipeline.append({"$match": {"emp.department": department}})
     pipeline += [
-        # $rank is competition ranking: 1, 2, 2, 4
         {"$setWindowFields": {"sortBy": {"total_late_minutes": -1}, "output": {"rank": {"$rank": {}}}}},
-        {"$match": {"rank": {"$lte": limit}}},  # limit applies to the rank, not the row count
+        {"$match": {"rank": {"$lte": limit}}},
         {"$sort": {"total_late_minutes": -1, "_id": 1}},
         {"$project": {
             "_id": 0,
@@ -606,9 +585,6 @@ def department_trend_pipeline(department: str, first: date, last: date) -> list:
             ],
             "as": "events",
         }},
-        # Turn every employee into events: their logs, a +1 headcount on the day they
-        # joined (or on `from` if earlier), and an empty event on `from` so the range
-        # is never empty for $densify.
         {"$project": {"events": {"$concatArrays": [
             "$events",
             [{"date": lo, "joined": zero, "present": zero, "late": zero}],
@@ -626,7 +602,6 @@ def department_trend_pipeline(department: str, first: date, last: date) -> list:
             "late_count": {"$sum": "$events.late"},
         }},
         {"$addFields": {"day": {"$dateFromString": {"dateString": "$_id", "format": "%Y-%m-%d"}}}},
-        # one row per calendar day; upper bound is exclusive
         {"$densify": {"field": "day", "range": {
             "step": 1, "unit": "day",
             "bounds": [datetime.combine(first, time(), UTC), datetime.combine(last + timedelta(days=1), time(), UTC)],
@@ -639,8 +614,6 @@ def department_trend_pipeline(department: str, first: date, last: date) -> list:
             "present_count": {"$ifNull": ["$present_count", 0]},
             "late_count": {"$ifNull": ["$late_count", 0]},
         }},
-        # rate in 1/10000ths, rounded half-up with integer maths:
-        # floor(present / headcount * 10000 + 0.5) = floor((present*20000 + hc) / (2*hc))
         {"$addFields": {"rate_x10000": {"$cond": [
             {"$and": ["$is_working_day", {"$gt": ["$headcount", 0]}]},
             {"$floor": {"$divide": [
@@ -649,7 +622,6 @@ def department_trend_pipeline(department: str, first: date, last: date) -> list:
             ]}},
             None,
         ]}}},
-        # only rows inside the range exist, so early rows get a shorter window
         {"$setWindowFields": {"sortBy": {"day": 1}, "output": {
             "rate_sum": {"$sum": "$rate_x10000", "window": window_7},
             "rate_n": {"$sum": {"$cond": [{"$eq": ["$rate_x10000", None]}, 0, 1]}, "window": window_7},
@@ -817,5 +789,4 @@ def explain_endpoint(
         command = {"aggregate": collection, "pipeline": pipeline, "cursor": {}}
 
     raw = db.command("explain", command, verbosity="executionStats")
-    # explain output holds BSON types (Timestamp, ObjectId...) that plain JSON can't encode
     return {"endpoint": endpoint, "collection": collection, "explain": json.loads(json_util.dumps(raw))}
